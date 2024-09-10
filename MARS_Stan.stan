@@ -27,10 +27,10 @@
 // 
 
 // Priors and hyperpriors:
-// The log HRs (b) is given a multivariate - normal distribution, with the vector of location hyperparameters (m_b). The prior for the hyperparameters m_b is normal with mean = 0 and SD = 3.
+// The log HRs (b) is given a multivariate - normal distribution, with the vector of location hyperparameters (mu_b). The prior for the hyperparameters mu_b is normal with mean = 0 and SD = 3.
 // The covariance of the MVN is generated from a cholesky correlation matrix (L_corr_b) with an LKJ prior, and a vector of error hyperparameters (b_raw) from a normal distribution with mean = 0 and SD = 1
 
-// The baseline hazards (log_lambda) is given a multivariate - normal distribution, with the vector of location hyperparameters (m_log_lambda). The prior for the hyperparameters m_log_lambda is normal with mean = 0 and SD = 3.
+// The baseline hazards (log_lambda) is given a multivariate - normal distribution, with the vector of location hyperparameters (mu_log_lambda). The prior for the hyperparameters mu_log_lambda is normal with mean = 0 and SD = 3.
 // Its covariance of the MVN is generated from a cholesky correlation matrix (L_corr_log_lambda) with an LKJ prior, and a vector of error hyperparameters (log_lambda_raw) from a normal distribution with mean = 0 and SD = 1
 
 // For efficiency and numerical stability, the correlation matrices are Cholesky factored.
@@ -90,62 +90,118 @@ transformed data {
     }  
   }
 
- 
 }
 
 
 parameters {
-  vector[study_n1 + study_n3] alpha; // study - specific intercept
-  vector[n_Study] beta; // study - specific log HR
-  vector[J] log_lambda_raw; // standard deviation hyperparameters of interval-specific (log) baseline hazards
-  vector[J] b_raw; // standard deviation hyperparameters of interval-specific log HR
-  vector[J] m_b; // location hyperparameter of interval-specific log HR
-  vector[J] m_log_lambda; // location hyperparameter of interval-specific (log) baseline hazards
-  cholesky_factor_corr[J] L_corr_log_lambda; // cholesky factor of correlation matrix of interval-specific (log) baseline hazards
-  cholesky_factor_corr[J] L_corr_b; // cholesky factor of correlation matrix of interval-specific log HR
+
+  real mu_alpha; //location hyper-parameteter for study-specific random intercepts
+  real<lower=0> sigma_alpha; //scale hyper-parameter for random intercepts
+  vector[study_n1 + study_n3] sigma_alpha_raw; 
+
+  real mu_beta; // location hyper-parameter for study-specific random slopes
+  real<lower=0> sigma_beta; // scale hyper-parameter for study-specific random slopes
+  vector[n_Study] sigma_beta_raw;
+
+  real mu_b; // location hyperparameter of interval-specific log HR
+  real<lower=0> sigma_b; // scale hyper-parameter for interval-specific log HR
+  vector[J] b_raw; 
+
+  real  mu_log_lambda; // location hyperparameter of interval-specific (log) baseline hazards
+  real<lower=0> sigma_log_lambda; // scale hyper-parameter for interval-specific (log) baseline hazards
+  vector[J] log_lambda_raw; 
+
+  real<lower = 0, upper=1> rho_b; //correlation parameter used in AR1 correlation for the log-hazards
+  real<lower = 0, upper=1> rho_log_lambda; //correlation parameter used in AR1 correlation for the log-baseline hazards
+
 }
 
 
 transformed parameters { 
-  // non-centred reparameterisation of b and log_lambda
-  vector[J] b = m_b + L_corr_b * b_raw; // interval-specific log HR parameters 
-                                        // implies b~MVN(m_b, [L_corr_b' * L_corr_b] * b_raw); 
-                                        // m_b~normal(0, 3);
-                                        // b_raw~normal(0, 1)
 
-  vector[J] log_lambda = m_log_lambda + L_corr_log_lambda * log_lambda_raw;   // interval-specific (log) baseline hazard parameters
-                                                                              // implies log_lambda~MVN(m_log_lambda, [L_corr_log_lambda' * L_corr_log_lambda] * log_lambda_raw); 
-                                                                              // m_b~normal(0, 3); 
-                                                                              // log_lambda_raw~normal(0, 1)
+    matrix[J, J] ar1_corr_chol_b;
+    matrix[J, J] ar1_corr_chol_log_lambda;
+
+    //Direct computation of Cholesky root of an AR(1) matrix
+    ar1_corr_chol_b = rep_matrix(0, J,J);
+    ar1_corr_chol_log_lambda = rep_matrix(0, J,J);
+
+    real scaling_factor_b = sqrt(1 - pow(rho_b, 2));
+    real scaling_factor_log_lambda = sqrt(1 - pow(rho_log_lambda, 2));
+
+
+    for(j in 1:J){
+        ar1_corr_chol_b[j,1] = pow(rho_b, j-1);
+        ar1_corr_chol_log_lambda[j,1] = pow(rho_log_lambda, j-1);
+    }
+
+    vector[J] v_b = scaling_factor_b * ar1_corr_chol_b[,1];
+    vector[J] v_log_lambda = scaling_factor_log_lambda * ar1_corr_chol_log_lambda[,1];
+
+    for (j in 2:J){
+        ar1_corr_chol_b[j:J, j] = v_b[1:J-j+1];
+        ar1_corr_chol_log_lambda[j:J, j] = v_log_lambda[1:J-j+1];
+    }
+
+    
+
+
+  // non-centred reparameterisation of b and log_lambda
+  vector[J] b = 5*mu_b + sigma_b * (ar1_corr_chol_b * b_raw); // interval-specific log HR parameters 
+                                        // implies b~MVN(mu_b, sigma_b * [L_corr_b' * L_corr_b]); 
+                                        // mu_b~normal(0, 5);
+                                        // sigma_b~half-normal(0, 1)
+
+  vector[J] log_lambda = 5*mu_log_lambda + sigma_log_lambda * (ar1_corr_chol_log_lambda * log_lambda_raw);   // interval-specific (log) baseline hazard parameters
+                                                                              // implies log_lambda~MVN(mu_log_lambda, sigma_log_lambda*[L_corr_log_lambda' * L_corr_log_lambda]); 
+                                                                              // mu_log_lambda~ normal(0, 5); 
+                                                                              // sigma_log_lambda~half-normal(0, 1)
+
+  //non-centred reparameterisation of alpha and beta
+  vector[study_n1 + study_n3] alpha = 2*mu_alpha + sigma_alpha*sigma_alpha_raw; // study - specific intercept
+                                                                    //implies alpha~N(mu_alpha, sigma_alpha)
+                                                                    //mu_alpha ~ N(0,2)
+                                                                    //sigma_alpha ~ half-Normal(0, 1)
+
+  vector[n_Study] beta = 2*mu_beta + sigma_beta*sigma_beta_raw; // study - specific slopes
+                                                                    //implies beta~N(mu_beta, sigma_beta)
+                                                                    //mu_beta ~ N(0,2)
+                                                                    //sigma_beta ~ half-Normal(0, 1)
+
 
 }
 
-
 model {
-  alpha ~ std_normal();
-  beta ~ std_normal();
+  mu_alpha~std_normal();
+  sigma_alpha~std_normal();
+  sigma_alpha_raw~std_normal();
 
-  m_b~normal(0, 3);
-  m_log_lambda~normal(0, 3);
+  mu_beta~std_normal();
+  sigma_beta~std_normal();
+  sigma_beta_raw~std_normal();
 
 
+  mu_b~std_normal();
+  sigma_b~std_normal();
   b_raw~std_normal();
+
+  mu_log_lambda~std_normal();
+  sigma_log_lambda~std_normal();
   log_lambda_raw~std_normal();
-
-  L_corr_log_lambda ~ lkj_corr_cholesky(1);
-  L_corr_b ~ lkj_corr_cholesky(1);
- 
-
-
+  
     vector[N3] u3;
     vector[N3] m3;
+    vector[N3] m3_t;
   for(i in 1:N3){
     real temp1 = 0;
     real temp2 = t3[i];
+    vector[int3[i]] temp_vec;
     for (j in 1:int3[i]){
-      temp1 += exp(log_lambda[j] + alpha[study3[i]] + (beta[study3[i]] + b[j]) * x3[i]);
+      temp_vec[j] = log_lambda[j] + alpha[study3[i]] + (beta[study3[i]] + b[j]) * x3[i];
     }
+    temp1 = exp(log_sum_exp(temp_vec));
     m3[i] = -temp1 - log1m(exp(-temp1));
+
   }
 
  
@@ -155,10 +211,14 @@ model {
   target += normal_lupdf(y2|beta[study2] + t2_matrix * b, s2);
   target += normal_lupdf(y3|m3, s3); 
   
+
+
+
   
 }
 
 generated quantities { 
+
   vector[J] HR_x1;
     HR_x1 = exp(b + mean(beta));
 
@@ -178,18 +238,23 @@ generated quantities {
     L_x1[j] = sum(lambda_adj_x1[1:j]);
   }
 
-  vector[J] log_surv_rate_x0;
-    log_surv_rate_x0[1] = -exp(log_lambda[1] + mean(alpha));
-  vector[J] log_surv_rate_x1;
-    log_surv_rate_x1[1] = -exp(log_lambda[1] + mean(alpha) + b[1] + mean(beta));
+  vector[J] loglog_surv_rate_x0;
 
-  for (j in 2:J){
-    log_surv_rate_x0[j] = (log_surv_rate_x0[j - 1])  -exp(log_lambda[j] + mean(alpha));
-    log_surv_rate_x1[j] = (log_surv_rate_x1[j - 1])  -exp(log_lambda[j] + mean(alpha) + b[j] + mean(beta)) ; 
+  vector[J] loglog_surv_rate_x1;
+    
+
+  for (j in 1:J){
+    loglog_surv_rate_x0[j] = (log_lambda[j] + mean(alpha));
+    loglog_surv_rate_x1[j] = (log_lambda[j] + mean(alpha) + b[j]  + mean(beta)) ; 
   }
 
-  vector[J] surv_rate_x0 = exp(log_surv_rate_x0);
-  vector[J] surv_rate_x1 = exp(log_surv_rate_x1);
+  vector[J] surv_rate_x0;
+  vector[J] surv_rate_x1;
+
+  for(j in 1:J){
+    surv_rate_x0[j] = exp(-exp(log_sum_exp(loglog_surv_rate_x0[1:j])));
+    surv_rate_x1[j] = exp(-exp(log_sum_exp(loglog_surv_rate_x1[1:j])));
+  }
 
   vector[J] RMST_x0;
     RMST_x0[1] = (surv_rate_x0[1] - 1) / (-exp(log_lambda[1] + mean(alpha)));
